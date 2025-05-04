@@ -1,0 +1,1 @@
+﻿get-process yasb -ErrorAction Ignore | Stop-Process -Force
