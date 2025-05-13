@@ -35,7 +35,7 @@ This is a nuspec. It mostly adheres to https://docs.nuget.org/create/Nuspec-Refe
     <packageSourceUrl>https://github.com/amnweb/yasb-chocolatey-package</packageSourceUrl>
     <docsUrl>https://github.com/amnweb/yasb/wiki</docsUrl>
     <projectUrl>https://github.com/amnweb/yasb</projectUrl>
-    <iconUrl>https://raw.githubusercontent.com/amnweb/yasb/main/src/assets/images/app_icon.png</iconUrl>
+    <iconUrl>https://cdn.statically.io/gh/amnweb/yasb/main/src/assets/images/app_icon.png</iconUrl>
     <projectSourceUrl>https://github.com/amnweb/yasb</projectSourceUrl>
     <licenseUrl>https://github.com/amnweb/yasb/blob/main/LICENSE</licenseUrl>
     <bugTrackerUrl>https://github.com/amnweb/yasb/issues</bugTrackerUrl>
