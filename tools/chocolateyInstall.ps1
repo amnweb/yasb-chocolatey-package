@@ -3,11 +3,11 @@ $toolsDir   = "$(Split-Path -parent $MyInvocation.MyCommand.Definition)"
 
 # Determine architecture - ARM64 builds use aarch64 naming
 if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
-  $url64      = 'https://github.com/amnweb/yasb/releases/download/v1.8.9/yasb-1.8.9-aarch64.msi'
-  $checksum64 = 'E06C8D3330A277BEBAF3F1958A2F0E4052FF4AA926716B9DD16BD6762C55F14E'
+$url64      = 'https://github.com/amnweb/yasb/releases/download/v1.9.0/yasb-1.9.0-aarch64.msi'
+  $checksum64 = 'E1FB13B4D0B115D1E773D2D15237EFCCD6950BAA7174A92EB85D05739CCE6683'
 } else {
-  $url64      = 'https://github.com/amnweb/yasb/releases/download/v1.8.9/yasb-1.8.9-x64.msi'
-  $checksum64 = '299F07871673A50962992F3C08551FF322EFD6F7A3D2871912AB652A9D116DF4'
+  $url64      = 'https://github.com/amnweb/yasb/releases/download/v1.9.0/yasb-1.9.0-x64.msi'
+  $checksum64 = '04E1C46A0A50025E91B57BF0E17AA93C4041EF23C4B8F1D2F0216113AB328675'
 }
 
 $packageArgs = @{
