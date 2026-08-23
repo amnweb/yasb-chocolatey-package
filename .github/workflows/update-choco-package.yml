@@ -1,0 +1,186 @@
+name: Update Chocolatey package
+
+# Manual only. Nothing runs on push or on a schedule.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'yasb version to package (e.g. 2.0.6). Leave empty to use the latest release.'
+        required: false
+        type: string
+      commit:
+        description: 'Commit the updated files back to the repo'
+        required: false
+        type: boolean
+        default: true
+      publish:
+        description: 'Submit the package to the Chocolatey community feed'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Update nuspec and install script
+        id: update
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # .NET file APIs resolve relative paths against the process working
+          # directory, not PowerShell's location. Pin them together.
+          [Environment]::CurrentDirectory = $PWD.Path
+
+          $headers = @{
+            'Accept'               = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+            'User-Agent'           = 'yasb-chocolatey-package'
+          }
+          if ($env:GH_TOKEN) { $headers['Authorization'] = "Bearer $env:GH_TOKEN" }
+
+          # --- resolve the release -------------------------------------------
+          $version = $env:INPUT_VERSION
+          if ($version) {
+            $version = $version.Trim().TrimStart('v', 'V')
+            Write-Host "Fetching release v$version ..."
+            $release = Invoke-RestMethod "https://api.github.com/repos/amnweb/yasb/releases/tags/v$version" -Headers $headers
+          } else {
+            Write-Host 'Fetching latest release ...'
+            $release = Invoke-RestMethod 'https://api.github.com/repos/amnweb/yasb/releases/latest' -Headers $headers
+            $version = $release.tag_name.Trim().TrimStart('v', 'V')
+          }
+          if ($release.prerelease) { throw "v$version is a prerelease; refusing to publish it." }
+          Write-Host "Version: $version"
+
+          # --- locate the MSI assets -----------------------------------------
+          $x64Asset   = $release.assets | Where-Object { $_.name -eq "yasb-$version-x64.msi" }
+          $arm64Asset = $release.assets | Where-Object { $_.name -eq "yasb-$version-aarch64.msi" }
+          if (-not $x64Asset)   { throw "Release v$version has no asset yasb-$version-x64.msi" }
+          if (-not $arm64Asset) { throw "Release v$version has no asset yasb-$version-aarch64.msi" }
+
+          # SHA-256 comes from the releases API when available, so we avoid
+          # downloading ~80 MB of installers just to hash them.
+          function Get-Sha256 {
+            param($Asset)
+            $digest = $null
+            if ($Asset.PSObject.Properties.Name -contains 'digest') { $digest = $Asset.digest }
+            if ($digest -and $digest -match '^sha256:([0-9a-fA-F]{64})$') { return $Matches[1].ToUpperInvariant() }
+            Write-Host "  no digest for $($Asset.name); downloading to hash it"
+            $tmp = Join-Path $env:RUNNER_TEMP $Asset.name
+            try {
+              Invoke-WebRequest $Asset.browser_download_url -OutFile $tmp -UseBasicParsing
+              return (Get-FileHash $tmp -Algorithm SHA256).Hash.ToUpperInvariant()
+            } finally { Remove-Item $tmp -Force -ErrorAction Ignore }
+          }
+
+          $x64Url   = $x64Asset.browser_download_url
+          $arm64Url = $arm64Asset.browser_download_url
+          $x64Sum   = Get-Sha256 $x64Asset
+          $arm64Sum = Get-Sha256 $arm64Asset
+          Write-Host "  x64     $x64Sum"
+          Write-Host "  aarch64 $arm64Sum"
+
+          # --- rewrite tools\chocolateyInstall.ps1 ---------------------------
+          # Only the quoted URL and checksum values are touched. Indentation,
+          # comments, line endings and file encoding are left exactly as-is.
+          $installPath = 'tools\chocolateyInstall.ps1'
+          $install     = [System.IO.File]::ReadAllText($installPath)
+
+          $q       = "'"
+          $pattern = "(\`$url64\s*=\s*$q)([^$q]*)($q\s*\r?\n\s*\`$checksum64\s*=\s*$q)([^$q]*)($q)"
+
+          $matchCount = ([regex]::Matches($install, $pattern)).Count
+          if ($matchCount -ne 2) { throw "Expected 2 url64/checksum64 pairs in $installPath but found $matchCount." }
+
+          $seen = @{}
+          $updated = [regex]::Replace($install, $pattern, {
+            param($m)
+            if ($m.Groups[2].Value -match 'aarch64') {
+              $seen['arm64'] = $true
+              $m.Groups[1].Value + $arm64Url + $m.Groups[3].Value + $arm64Sum + $m.Groups[5].Value
+            } else {
+              $seen['x64'] = $true
+              $m.Groups[1].Value + $x64Url + $m.Groups[3].Value + $x64Sum + $m.Groups[5].Value
+            }
+          })
+
+          if (-not $seen['x64'])   { throw "No x64 url64/checksum64 pair was matched in $installPath." }
+          if (-not $seen['arm64']) { throw "No aarch64 url64/checksum64 pair was matched in $installPath." }
+
+          [System.IO.File]::WriteAllText($installPath, $updated)
+
+          # --- rewrite yasb.nuspec -------------------------------------------
+          # Only the text inside <version></version> changes.
+          $nuspecPath = 'yasb.nuspec'
+          $nuspec     = [System.IO.File]::ReadAllText($nuspecPath)
+          $vPattern   = '(?<=<version>)[^<]+(?=</version>)'
+          $vCount     = ([regex]::Matches($nuspec, $vPattern)).Count
+          if ($vCount -ne 1) { throw "Expected 1 <version> element in $nuspecPath but found $vCount." }
+          [System.IO.File]::WriteAllText($nuspecPath, [regex]::Replace($nuspec, $vPattern, { param($m) $version }))
+
+          # --- verify ----------------------------------------------------------
+          $check = [System.IO.File]::ReadAllText($installPath)
+          foreach ($needle in @($x64Url, $arm64Url, $x64Sum, $arm64Sum)) {
+            if (-not $check.Contains($needle)) { throw "Post-update check failed: $needle is missing from $installPath." }
+          }
+
+          Write-Host "Updated $nuspecPath and $installPath to $version."
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Show what changed
+        shell: pwsh
+        run: git --no-pager diff
+
+      - name: Commit and push
+        if: inputs.commit
+        shell: pwsh
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add yasb.nuspec tools/chocolateyInstall.ps1
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host 'Nothing to commit - already at ${{ steps.update.outputs.version }}.'
+          } else {
+            git commit -m "feat: update package version to ${{ steps.update.outputs.version }} and corresponding URLs"
+            if ($LASTEXITCODE -ne 0) { throw 'git commit failed.' }
+            git push
+            if ($LASTEXITCODE -ne 0) { throw 'git push failed.' }
+          }
+
+      - name: Pack
+        shell: pwsh
+        run: |
+          choco pack yasb.nuspec --outputdirectory .
+          if ($LASTEXITCODE -ne 0) { throw "choco pack failed with exit code $LASTEXITCODE." }
+
+      - name: Submit to Chocolatey
+        if: inputs.publish
+        shell: pwsh
+        env:
+          CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
+        run: |
+          if (-not $env:CHOCO_API_KEY) {
+            throw 'CHOCO_API_KEY secret is not set (Settings > Secrets and variables > Actions).'
+          }
+          $nupkg = Get-ChildItem -Filter 'yasb.*.nupkg' | Select-Object -First 1
+          if (-not $nupkg) { throw 'No .nupkg found to submit.' }
+
+          Write-Host "Submitting $($nupkg.Name) ..."
+          choco push $nupkg.FullName --source 'https://push.chocolatey.org/' --api-key $env:CHOCO_API_KEY
+          if ($LASTEXITCODE -ne 0) {
+            throw "choco push failed with exit code $LASTEXITCODE. A conflict/409 usually means this version was already submitted."
+          }
+          Write-Host 'Submitted. Chocolatey moderation reviews the package before it goes live.'
